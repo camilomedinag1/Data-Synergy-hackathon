@@ -39,3 +39,6 @@ flutter:
   uses-material-design: true
   assets:
     - assets/models/mobilefacenet_112x112_128d.tflite
+    - assets/images/                  # Declara la carpeta de imágenes
+    - assets/images/logo_dataface.png # Declara el logo DF
+    - assets/images/logo_sioma.png    # Declara el logo SIOMA
