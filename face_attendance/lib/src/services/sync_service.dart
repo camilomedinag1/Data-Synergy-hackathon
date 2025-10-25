@@ -1,7 +1,6 @@
 import 'dart:async'; // Para Streams y Timers
 import 'dart:convert'; // Para codificar a JSON (jsonEncode)
 
-// Asegúrate de que esta importación esté presente y sea correcta
 import 'package:connectivity_plus/connectivity_plus.dart'; // Para detectar conexión
 import 'package:http/http.dart' as http; // Para hacer peticiones web (envío API)
 import 'package:sqflite/sqflite.dart'; // Para interactuar con la base de datos
@@ -10,142 +9,134 @@ import 'locator.dart'; // Para obtener la conexión a la BD centralizada
 
 class SyncService {
   SyncService() {
-    // El constructor ahora está vacío, la BD se obtiene en init()
+    // Constructor vacío
   }
 
-  Database? _db; // Variable para guardar la conexión a la BD
-  // Variable para la suscripción a los cambios de conectividad
-  StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
-  bool _isSyncing = false; // Bandera para evitar sincronizaciones simultáneas
+  Database? _db; // Variable para la conexión a la BD
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription; // Listener de red
+  bool _isSyncing = false; // Bandera anti-duplicados
 
-  // Nombre de la tabla de asistencia (debe ser IGUAL al de recognition_service.dart)
+  // Nombres de las tablas (deben coincidir con recognition_service.dart)
   static const String _tableAttendance = 'registros_asistencia';
-  // >>> ¡IMPORTANTE! Cambia esta URL por la URL REAL de la API de SIOMA <<<
+  // ===================================================================
+  // ====================== SECCIÓN MODIFICADA 1 =======================
+  // ===================================================================
+  // Añadir nombre de la tabla de empleados para poder consultarla
+  static const String _tableEmployees = 'empleados';
+  // ===================================================================
+  // ==================== FIN DE SECCIÓN MODIFICADA 1 ==================
+  // ===================================================================
+
+  // URL para Webhook (o la API real de SIOMA)
   final String _apiUrl = 'https://webhook.site/60abfcfa-fbe3-4012-88b8-2ac35df2dc4c'; // URL de destino
 
-  // Función de inicialización del servicio
+  // Inicialización del servicio
   Future<void> init() async {
-    // 1. Obtener la conexión a la BD desde el RecognitionService
-    _db = ServiceLocator.recognition.database;
-
-    // 2. Empezar a escuchar si el estado de la red cambia
-    //    Especificamos el tipo <List<ConnectivityResult>> para claridad
-    _connectivitySubscription = Connectivity().onConnectivityChanged.listen(
-      (List<ConnectivityResult> results) { // Asegúrate que el tipo aquí es List<ConnectivityResult>
-        _handleConnectivityChange(results);
-      }
-    );
-
-    // 3. Intenta sincronizar una vez al arrancar la app
+    _db = ServiceLocator.recognition.database; // Obtener BD
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen(_handleConnectivityChange); // Escuchar red
     print('SyncService: Iniciado. Intentando sincronización inicial.');
-    await _attemptSync();
+    await _attemptSync(); // Sincronizar al inicio
   }
 
-  // Función para liberar recursos
+  // Liberar recursos
   void dispose() {
-    _connectivitySubscription?.cancel(); // Dejar de escuchar cambios de red
+    _connectivitySubscription?.cancel();
   }
 
-  // Esta función se ejecuta CADA VEZ que cambia el estado de la red
-  // Asegúrate que el parámetro aquí sea List<ConnectivityResult>
+  // Manejador de cambios de red
   void _handleConnectivityChange(List<ConnectivityResult> results) {
-    // Comprueba si en la lista de resultados está "mobile" (datos) o "wifi"
-    final bool hasConnection = results.contains(ConnectivityResult.mobile) ||
-                               results.contains(ConnectivityResult.wifi);
-
+    final bool hasConnection = results.contains(ConnectivityResult.mobile) || results.contains(ConnectivityResult.wifi);
     if (hasConnection) {
       print('SyncService: Conexión detectada. Intentando sincronizar...');
-      _attemptSync(); // Si hay conexión, intentar enviar pendientes
+      _attemptSync();
     } else {
       print('SyncService: Sin conexión.');
     }
   }
 
-  // Función principal que orquesta el proceso de sincronización
+  // Orquestador de la sincronización
   Future<void> _attemptSync() async {
-    // Si ya se está ejecutando una sincronización, no hacer nada
-    if (_isSyncing) {
-      print('SyncService: Sincronización ya en progreso. Omitiendo.');
-      return;
-    }
-    // Si la base de datos no está lista
-    if (_db == null) {
-      print('SyncService: Error - Base de datos no disponible.');
-      return;
-    }
-
-    _isSyncing = true; // Marcar que estamos empezando a sincronizar
+    if (_isSyncing || _db == null) return; // Evitar ejecuciones paralelas o sin BD
+    _isSyncing = true;
     print('SyncService: Iniciando ciclo de sincronización.');
-
     try {
-      // 1. Buscar registros pendientes en la base de datos local
       final List<Map<String, Object?>> pendingRecords = await _getPendingRecords();
       print('SyncService: Se encontraron ${pendingRecords.length} registros pendientes.');
-
-      // Si no hay nada pendiente, terminar
       if (pendingRecords.isEmpty) {
-        print('SyncService: No hay registros para sincronizar.');
-        _isSyncing = false; // Liberar la bandera
+        _isSyncing = false;
         return;
       }
-
-      // 2. Procesar cada registro pendiente UNO POR UNO
       for (final record in pendingRecords) {
         final int recordId = record['id_registro'] as int;
         print('SyncService: Procesando registro ID: $recordId');
-
-        // 3. Intentar enviar el registro a la API
+        // MODIFICADO: Ahora _sendRecordToApi puede fallar si no encuentra al empleado
         final bool success = await _sendRecordToApi(record);
-
-        // 4. Si el envío fue exitoso...
         if (success) {
-          // ...marcar el registro como sincronizado en la BD local
           await _markRecordAsSynced(recordId);
           print('SyncService: Registro ID: $recordId marcado como sincronizado.');
         } else {
-          // Si falló el envío
-          print('SyncService: Falló el envío del registro ID: $recordId. Se reintentará en el próximo ciclo.');
+          print('SyncService: Falló el envío del registro ID: $recordId (podría ser error de red o empleado no encontrado). Se reintentará.');
         }
       }
       print('SyncService: Ciclo de sincronización completado.');
     } catch (e) {
-      // Capturar cualquier error inesperado
       print('SyncService: Error general durante la sincronización: $e');
     } finally {
-      // Asegurarse de liberar la bandera SIEMPRE
       _isSyncing = false;
     }
   }
 
-  // Función para obtener los registros pendientes de la BD
+  // Obtener registros pendientes (sin cambios)
   Future<List<Map<String, Object?>>> _getPendingRecords({int limit = 50}) async {
-    // Consulta la tabla de asistencia...
     return await _db!.query(
       _tableAttendance,
-      where: 'sincronizado = ?', // ...donde la columna 'sincronizado' sea 0
-      whereArgs: [0],
-      limit: limit, // Traer máximo 50
-      orderBy: 'fecha_hora ASC', // Opcional: Enviar los más antiguos primero
+      where: 'sincronizado = ?', whereArgs: [0],
+      limit: limit, orderBy: 'fecha_hora ASC',
     );
   }
 
-  // Función para enviar UN registro a la API
+  // ===================================================================
+  // ====================== SECCIÓN MODIFICADA 2 =======================
+  // ===================================================================
+  // Función para enviar UN registro a la API (AHORA BUSCA NOMBRE Y DOCUMENTO)
   Future<bool> _sendRecordToApi(Map<String, Object?> record) async {
-    // >>> ¡IMPORTANTE! Adapta el 'body' a lo que la API de SIOMA espera <<<
     try {
-      // 1. Preparar los datos en formato JSON
+      // 1. Obtener el ID interno del empleado desde el registro de asistencia
+      final int empleadoId = record['id_empleado'] as int;
+
+      // 2. Buscar Nombre y Documento (Cédula) en la tabla 'empleados'
+      final List<Map<String, Object?>> employeeData = await _db!.query(
+        _tableEmployees,
+        columns: ['nombre', 'documento'], // Solo necesitamos estas columnas
+        where: 'id = ?', // Buscar por el ID interno
+        whereArgs: [empleadoId],
+        limit: 1, // Solo esperamos un resultado
+      );
+
+      // Si por alguna razón no encontramos al empleado (muy raro), fallamos el envío
+      if (employeeData.isEmpty) {
+        print('SyncService: Error - No se encontró empleado con ID: $empleadoId para el registro ${record['id_registro']}.');
+        return false; // Indicar fallo para que se reintente luego
+      }
+
+      // Extraer los datos del empleado
+      final String? nombreEmpleado = employeeData.first['nombre'] as String?;
+      final String? documentoEmpleado = employeeData.first['documento'] as String?; // Esta es la Cédula
+
+      // 3. Preparar los datos en formato JSON CON LOS DATOS CORRECTOS
       final body = jsonEncode({
-        'id_empleado': record['id_empleado'],
-        'fecha_hora_registro': record['fecha_hora'],
-        'tipo_evento': record['tipo_evento'],
-        'identificador_dispositivo': record['id_dispositivo'],
-        // ... añade aquí cualquier otro campo que necesites enviar ...
+        // Usar los nombres de campo que SIOMA espera:
+        'documento': documentoEmpleado ?? '', // Enviar cédula (o vacío si no existe)
+        'nombre': nombreEmpleado ?? '',       // Enviar nombre (o vacío si no existe)
+        'fecha_hora_evento': record['fecha_hora'], // Fecha/Hora del registro
+        'tipo_evento': record['tipo_evento'],     // 'entrada' o 'salida'
+        // 'id_dispositivo': record['id_dispositivo'], // Descomenta si SIOMA también necesita esto
       });
 
       print('SyncService: Enviando a API: POST $_apiUrl');
-      print('SyncService: Cuerpo JSON: $body');
+      print('SyncService: Cuerpo JSON: $body'); // Ahora mostrará nombre y documento
 
-      // 2. Hacer la petición POST a la API
+      // 4. Hacer la petición POST a la API (sin cambios aquí)
       final response = await http.post(
         Uri.parse(_apiUrl),
         headers: {
@@ -153,28 +144,28 @@ class SyncService {
           // 'Authorization': 'Bearer TU_TOKEN_AQUI', // Si necesitas autenticación
         },
         body: body,
-      ).timeout(const Duration(seconds: 20)); // Esperar máximo 20 segundos
+      ).timeout(const Duration(seconds: 20));
 
       print('SyncService: Respuesta de API [${response.statusCode}] para registro ${record['id_registro']}: ${response.body}');
 
-      // 3. Verificar si la respuesta fue exitosa (código 2xx)
+      // 5. Verificar si la respuesta fue exitosa (código 2xx)
       return response.statusCode >= 200 && response.statusCode < 300;
 
     } catch (e) {
-      // Capturar errores de red, timeouts, etc.
-      print('SyncService: Error de red/http enviando registro ${record['id_registro']}: $e');
+      // Capturar errores de red, timeouts, o errores buscando al empleado
+      print('SyncService: Error procesando/enviando registro ${record['id_registro']}: $e');
       return false; // Indicar que el envío falló
     }
   }
+  // ===================================================================
+  // ==================== FIN DE SECCIÓN MODIFICADA 2 ==================
+  // ===================================================================
 
-  // Función para marcar un registro como sincronizado en la BD
+  // Marcar registro como sincronizado (sin cambios)
   Future<void> _markRecordAsSynced(int recordId) async {
-    // Actualiza la tabla de asistencia...
     await _db!.update(
-      _tableAttendance,
-      {'sincronizado': 1},   // ...poniendo la columna 'sincronizado' a 1
-      where: 'id_registro = ?', // ...para el registro con este ID específico
-      whereArgs: [recordId],
+      _tableAttendance, {'sincronizado': 1},
+      where: 'id_registro = ?', whereArgs: [recordId],
     );
   }
 }

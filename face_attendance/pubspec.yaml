@@ -34,5 +34,5 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
-    - assets/models/mobilefacenet.tflite
+#    - assets/models/mobilefacenet.tflite
     - assets/models/mobilefacenet_112x112_128d.tflite
