@@ -1,7 +1,7 @@
 import 'dart:math';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sqflite/sqflite.dart';
+import 'package:sqflite_sqlcipher/sqflite.dart' as sql;
 // import 'package:path/path.dart' as p; // <-- ELIMINADO
 import 'locator.dart'; // <-- AÑADIDO
 
@@ -10,7 +10,7 @@ class AttendanceService {
 
   static const String _kDeviceKey = 'device_id_v1';
   final SharedPreferences _prefs;
-  Database? _db;
+  sql.Database? _db;
 
   // static const String _dbName = ...; // <-- ELIMINADO
   static const String _table = 'registros_asistencia';
@@ -51,14 +51,14 @@ class AttendanceService {
   Future<List<Map<String, Object?>>> readLog({int limit = 100}) async {
     // Esta lógica ahora funciona, porque llamará a nuestro nuevo 'init()'
     final db = _db; if (db == null) { await init(); }
-    final Database useDb = _db!;
+    final sql.Database useDb = _db!;
     return await useDb.query(_table, orderBy: 'fecha_hora DESC', limit: limit);
   }
 
   Future<void> _append(String type, String personId, {bool validated = true, String? notes}) async {
     // Esta lógica ahora funciona, porque llamará a nuestro nuevo 'init()'
     final db = _db; if (db == null) { await init(); }
-    final Database useDb = _db!;
+    final sql.Database useDb = _db!;
     final String deviceId = await _getOrCreateDeviceId();
     final int empleadoId = int.tryParse(personId) ?? -1;
     if (empleadoId <= 0) return;

@@ -7,6 +7,13 @@ class RecognizedPerson {
     this.telefono,
     this.imagePath,
     this.distance,
+    // <<< CAMPOS DE EMERGENCIA Y NUEVOS DETALLES >>>
+    this.area,
+    this.eps,
+    this.contactoNombre,
+    this.contactoTelefono,
+    this.tipoSangre,
+    this.alergias,
   });
 
   final String id;
@@ -16,6 +23,11 @@ class RecognizedPerson {
   final String? telefono;
   final String? imagePath;
   final double? distance;
+  // <<< CAMPOS NUEVOS >>>
+  final String? area;
+  final String? eps;
+  final String? contactoNombre;
+  final String? contactoTelefono;
+  final String? tipoSangre;
+  final String? alergias;
 }
-
-

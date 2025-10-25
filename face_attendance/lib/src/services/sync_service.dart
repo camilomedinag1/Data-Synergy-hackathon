@@ -3,7 +3,7 @@ import 'dart:convert'; // Para codificar a JSON (jsonEncode)
 
 import 'package:connectivity_plus/connectivity_plus.dart'; // Para detectar conexión
 import 'package:http/http.dart' as http; // Para hacer peticiones web (envío API)
-import 'package:sqflite/sqflite.dart'; // Para interactuar con la base de datos
+import 'package:sqflite_sqlcipher/sqflite.dart' as sql;
 
 import 'locator.dart'; // Para obtener la conexión a la BD centralizada
 
@@ -12,7 +12,7 @@ class SyncService {
     // Constructor vacío
   }
 
-  Database? _db; // Variable para la conexión a la BD
+  sql.Database? _db; // Variable para la conexión a la BD
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription; // Listener de red
   bool _isSyncing = false; // Bandera anti-duplicados
 

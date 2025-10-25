@@ -170,17 +170,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           final embedding = ServiceLocator.embedder.runEmbedding(data);
           _lastEmbedding = embedding; // Guardar último embedding por si acaso
 
-          // ===================================================================
-          // ====================== SECCIÓN MODIFICADA =======================
-          // ===================================================================
           // PRINT DE DIAGNÓSTICO: Ver el estado del caché ANTES de identificar
           print('HomeScreen: Intentando identificar. Cache tiene: ${ServiceLocator.recognition.cacheStatus}');
-          // ===================================================================
-          // ==================== FIN DE SECCIÓN MODIFICADA ==================
-          // ===================================================================
+          
 
           // Intentar identificar el rostro usando el embedding
-          final match = await ServiceLocator.recognition.identify(embedding, threshold: 1.20);
+          final match = await ServiceLocator.recognition.identify(embedding, threshold: 0.85);
 
           // Si se encontró una coincidencia...
           if (match != null) {
