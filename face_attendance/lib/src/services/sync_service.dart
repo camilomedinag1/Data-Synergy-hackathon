@@ -1,4 +1,5 @@
-import 'dart:async'; // Para Streams y Timers
+
+import 'package:flutter/foundation.dart';import 'dart:async'; // Para Streams y Timers
 import 'dart:convert'; // Para codificar a JSON (jsonEncode)
 
 import 'package:connectivity_plus/connectivity_plus.dart'; // Para detectar conexión
@@ -16,34 +17,23 @@ class SyncService {
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription; // Listener de red
   bool _isSyncing = false; // Bandera anti-duplicados
 
-  // Nombres de las tablas (deben coincidir con recognition_service.dart)
+  // Nombres de las tablas
   static const String _tableAttendance = 'registros_asistencia';
-  // ===================================================================
-  // ====================== SECCIÓN MODIFICADA 1 =======================
-  // ===================================================================
-  // Añadir nombre de la tabla de empleados para poder consultarla
   static const String _tableEmployees = 'empleados';
-  // ===================================================================
-  // ==================== FIN DE SECCIÓN MODIFICADA 1 ==================
-  // ===================================================================
 
-  // URL para Webhook (o la API real de SIOMA)
-  final String _apiUrl = 'https://webhook.site/60abfcfa-fbe3-4012-88b8-2ac35df2dc4c'; // URL de destino
+  final String _apiUrl = 'https://webhook.site/60abfcfa-fbe3-4012-88b8-2ac35df2dc4c';
 
-  // Inicialización del servicio
   Future<void> init() async {
-    _db = ServiceLocator.recognition.database; // Obtener BD
-    _connectivitySubscription = Connectivity().onConnectivityChanged.listen(_handleConnectivityChange); // Escuchar red
+    _db = ServiceLocator.recognition.database;
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen(_handleConnectivityChange);
     print('SyncService: Iniciado. Intentando sincronización inicial.');
-    await _attemptSync(); // Sincronizar al inicio
+    await _attemptSync();
   }
 
-  // Liberar recursos
   void dispose() {
     _connectivitySubscription?.cancel();
   }
 
-  // Manejador de cambios de red
   void _handleConnectivityChange(List<ConnectivityResult> results) {
     final bool hasConnection = results.contains(ConnectivityResult.mobile) || results.contains(ConnectivityResult.wifi);
     if (hasConnection) {
@@ -54,9 +44,8 @@ class SyncService {
     }
   }
 
-  // Orquestador de la sincronización
   Future<void> _attemptSync() async {
-    if (_isSyncing || _db == null) return; // Evitar ejecuciones paralelas o sin BD
+    if (_isSyncing || _db == null) return;
     _isSyncing = true;
     print('SyncService: Iniciando ciclo de sincronización.');
     try {
@@ -64,30 +53,36 @@ class SyncService {
       print('SyncService: Se encontraron ${pendingRecords.length} registros pendientes.');
       if (pendingRecords.isEmpty) {
         _isSyncing = false;
+        // <<< CAMBIO: Notificar a los listeners que ya no hay pendientes >>>
+        _notifyListeners(); // Asegura que el icono se actualice a verde
         return;
       }
       for (final record in pendingRecords) {
         final int recordId = record['id_registro'] as int;
         print('SyncService: Procesando registro ID: $recordId');
-        // MODIFICADO: Ahora _sendRecordToApi puede fallar si no encuentra al empleado
         final bool success = await _sendRecordToApi(record);
         if (success) {
           await _markRecordAsSynced(recordId);
           print('SyncService: Registro ID: $recordId marcado como sincronizado.');
         } else {
-          print('SyncService: Falló el envío del registro ID: $recordId (podría ser error de red o empleado no encontrado). Se reintentará.');
+          print('SyncService: Falló el envío del registro ID: $recordId. Se reintentará.');
         }
+        // <<< CAMBIO: Notificar después de procesar cada registro >>>
+        _notifyListeners(); // Actualiza el contador mientras sincroniza
       }
       print('SyncService: Ciclo de sincronización completado.');
     } catch (e) {
       print('SyncService: Error general durante la sincronización: $e');
     } finally {
       _isSyncing = false;
+       // <<< CAMBIO: Notificar al finalizar (incluso si hubo error) >>>
+      _notifyListeners(); // Asegura estado final correcto
     }
   }
 
-  // Obtener registros pendientes (sin cambios)
   Future<List<Map<String, Object?>>> _getPendingRecords({int limit = 50}) async {
+    // <<< CAMBIO: Asegurarse que _db no sea null antes de usarlo >>>
+    if (_db == null) return [];
     return await _db!.query(
       _tableAttendance,
       where: 'sincronizado = ?', whereArgs: [0],
@@ -95,77 +90,96 @@ class SyncService {
     );
   }
 
-  // ===================================================================
-  // ====================== SECCIÓN MODIFICADA 2 =======================
-  // ===================================================================
-  // Función para enviar UN registro a la API (AHORA BUSCA NOMBRE Y DOCUMENTO)
   Future<bool> _sendRecordToApi(Map<String, Object?> record) async {
+     // <<< CAMBIO: Asegurarse que _db no sea null antes de usarlo >>>
+    if (_db == null) return false;
     try {
-      // 1. Obtener el ID interno del empleado desde el registro de asistencia
       final int empleadoId = record['id_empleado'] as int;
-
-      // 2. Buscar Nombre y Documento (Cédula) en la tabla 'empleados'
       final List<Map<String, Object?>> employeeData = await _db!.query(
         _tableEmployees,
-        columns: ['nombre', 'documento'], // Solo necesitamos estas columnas
-        where: 'id = ?', // Buscar por el ID interno
+        columns: ['nombre', 'documento'],
+        where: 'id = ?',
         whereArgs: [empleadoId],
-        limit: 1, // Solo esperamos un resultado
+        limit: 1,
       );
 
-      // Si por alguna razón no encontramos al empleado (muy raro), fallamos el envío
       if (employeeData.isEmpty) {
         print('SyncService: Error - No se encontró empleado con ID: $empleadoId para el registro ${record['id_registro']}.');
-        return false; // Indicar fallo para que se reintente luego
+        return false;
       }
 
-      // Extraer los datos del empleado
       final String? nombreEmpleado = employeeData.first['nombre'] as String?;
-      final String? documentoEmpleado = employeeData.first['documento'] as String?; // Esta es la Cédula
+      final String? documentoEmpleado = employeeData.first['documento'] as String?;
 
-      // 3. Preparar los datos en formato JSON CON LOS DATOS CORRECTOS
       final body = jsonEncode({
-        // Usar los nombres de campo que SIOMA espera:
-        'documento': documentoEmpleado ?? '', // Enviar cédula (o vacío si no existe)
-        'nombre': nombreEmpleado ?? '',       // Enviar nombre (o vacío si no existe)
-        'fecha_hora_evento': record['fecha_hora'], // Fecha/Hora del registro
-        'tipo_evento': record['tipo_evento'],     // 'entrada' o 'salida'
-        // 'id_dispositivo': record['id_dispositivo'], // Descomenta si SIOMA también necesita esto
+        'documento': documentoEmpleado ?? '',
+        'nombre': nombreEmpleado ?? '',
+        'fecha_hora_evento': record['fecha_hora'],
+        'tipo_evento': record['tipo_evento'],
       });
 
       print('SyncService: Enviando a API: POST $_apiUrl');
-      print('SyncService: Cuerpo JSON: $body'); // Ahora mostrará nombre y documento
+      print('SyncService: Cuerpo JSON: $body');
 
-      // 4. Hacer la petición POST a la API (sin cambios aquí)
       final response = await http.post(
         Uri.parse(_apiUrl),
-        headers: {
-          'Content-Type': 'application/json; charset=UTF-8',
-          // 'Authorization': 'Bearer TU_TOKEN_AQUI', // Si necesitas autenticación
-        },
+        headers: {'Content-Type': 'application/json; charset=UTF-8'},
         body: body,
       ).timeout(const Duration(seconds: 20));
 
       print('SyncService: Respuesta de API [${response.statusCode}] para registro ${record['id_registro']}: ${response.body}');
-
-      // 5. Verificar si la respuesta fue exitosa (código 2xx)
       return response.statusCode >= 200 && response.statusCode < 300;
 
     } catch (e) {
-      // Capturar errores de red, timeouts, o errores buscando al empleado
       print('SyncService: Error procesando/enviando registro ${record['id_registro']}: $e');
-      return false; // Indicar que el envío falló
+      return false;
     }
   }
-  // ===================================================================
-  // ==================== FIN DE SECCIÓN MODIFICADA 2 ==================
-  // ===================================================================
 
-  // Marcar registro como sincronizado (sin cambios)
   Future<void> _markRecordAsSynced(int recordId) async {
+     // <<< CAMBIO: Asegurarse que _db no sea null antes de usarlo >>>
+    if (_db == null) return;
     await _db!.update(
       _tableAttendance, {'sincronizado': 1},
       where: 'id_registro = ?', whereArgs: [recordId],
     );
   }
+
+  // --- NUEVO CÓDIGO PARA EL INDICADOR ---
+
+  // Lista de funciones que quieren ser notificadas de cambios en el contador
+  final List<VoidCallback> _listeners = [];
+
+  // Método para que otros (HomeScreen) se suscriban a los cambios
+  void addListener(VoidCallback listener) {
+    _listeners.add(listener);
+  }
+
+  // Método para que otros se desuscriban
+  void removeListener(VoidCallback listener) {
+    _listeners.remove(listener);
+  }
+
+  // Notifica a todos los listeners suscritos
+  void _notifyListeners() {
+    for (final listener in _listeners) {
+      listener();
+    }
+  }
+
+  // Devuelve la cantidad ACTUAL de registros pendientes
+  Future<int> getPendingRecordCount() async {
+    if (_db == null) return 0;
+    try {
+      // Usamos `rawQuery` para simplificar la obtención del COUNT
+      final List<Map<String, Object?>> result = await _db!.rawQuery(
+        'SELECT COUNT(*) as count FROM $_tableAttendance WHERE sincronizado = 0'
+      );
+      return (result.first['count'] as int?) ?? 0;
+    } catch (e) {
+      print('SyncService: Error contando registros pendientes: $e');
+      return 0;
+    }
+  }
+  // --- FIN NUEVO CÓDIGO ---
 }

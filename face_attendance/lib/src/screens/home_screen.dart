@@ -37,18 +37,50 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool _facePresent = false;
   List<double>? _lastEmbedding;
 
+  // <<< CAMBIO: Variables para el indicador de sincronización >>>
+  int _pendingSyncCount = 0;
+  Timer? _syncStatusTimer;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _initFuture = _initialize();
+
+    // <<< CAMBIO: Inicializar indicador de sincronización >>>
+    // Obtener estado inicial
+    _updateSyncStatus();
+    // Escuchar cambios desde SyncService
+    ServiceLocator.sync.addListener(_updateSyncStatus);
+    // Refrescar periódicamente (ej. cada 30 seg) por si acaso
+    _syncStatusTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+       // Solo actualiza si el widget todavía está montado
+       if (mounted) _updateSyncStatus();
+    });
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _controller?.dispose();
+    // <<< CAMBIO: Limpiar listener y timer de sincronización >>>
+    ServiceLocator.sync.removeListener(_updateSyncStatus);
+    _syncStatusTimer?.cancel();
     super.dispose();
+  }
+
+  // <<< CAMBIO: Nueva función para actualizar el estado de sincronización >>>
+  Future<void> _updateSyncStatus() async {
+    // Verificar que el widget siga montado antes de llamar a setState
+    if (!mounted) return;
+    final count = await ServiceLocator.sync.getPendingRecordCount();
+    // Solo actualizar si el valor cambió para evitar rebuilds innecesarios
+    if (count != _pendingSyncCount && mounted) {
+      setState(() {
+        _pendingSyncCount = count;
+      });
+       print("HomeScreen: Estado de sincronización actualizado. Pendientes: $count");
+    }
   }
 
   @override
@@ -65,192 +97,223 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           });
         }
       }
+      // <<< CAMBIO: Actualizar estado de sync al volver a la app >>>
+       if (mounted) _updateSyncStatus();
     }
   }
 
   Future<void> _initialize() async {
-    await _controller?.dispose();
-    _controller = null;
+    // ... (resto de _initialize sin cambios) ...
+      await _controller?.dispose();
+      _controller = null;
 
-    await Permission.camera.request();
-    if (!(await Permission.camera.isGranted)) {
-       print("HomeScreen: Permiso de cámara denegado.");
-       return;
-    }
+      await Permission.camera.request();
+      if (!(await Permission.camera.isGranted)) {
+        print("HomeScreen: Permiso de cámara denegado.");
+        return;
+      }
 
-    _cameras = await availableCameras();
-    if (_cameras.isEmpty) {
-       print("HomeScreen: No se encontraron cámaras disponibles.");
-       return;
-    }
+      _cameras = await availableCameras();
+      if (_cameras.isEmpty) {
+        print("HomeScreen: No se encontraron cámaras disponibles.");
+        return;
+      }
 
-    final CameraDescription camera = _cameras.firstWhere(
-      (c) => c.lensDirection == CameraLensDirection.front,
-      orElse: () => _cameras.first,
-    );
+      final CameraDescription camera = _cameras.firstWhere(
+        (c) => c.lensDirection == CameraLensDirection.front,
+        orElse: () => _cameras.first,
+      );
 
-    try {
-       _controller = CameraController(
-         camera,
-         ResolutionPreset.medium,
-         enableAudio: false,
-         imageFormatGroup: ImageFormatGroup.yuv420,
-       );
-       await _controller!.initialize();
-       print("HomeScreen: Controlador de cámara inicializado.");
-
-       if (mounted && _controller != null && _controller!.value.isInitialized) {
-         await _controller!.startImageStream(_onCameraImage);
-         print("HomeScreen: Image stream iniciado.");
-       } else {
-         print("HomeScreen: No se inició el image stream (widget desmontado o controlador no inicializado).");
-       }
-    } catch (e) {
-       print("HomeScreen: ERROR inicializando la cámara: $e");
-       _controller = null;
-    } finally {
-       if (mounted) {
-          setState(() {});
-       }
-    }
-  }
-
-
-  void _onCameraImage(CameraImage image) {
-    // Primera defensa (sin cambios)
-    if (_isProcessing || _controller == null || !_controller!.value.isInitialized) return;
-
-    _isProcessing = true;
-    () async {
       try {
-        // <<< INICIO DEL CAMBIO (ARREGLO PARA RACE CONDITION) >>>
-        // Segunda defensa: Verificar de nuevo DENTRO del try-catch,
-        // justo antes de usar el controlador.
-        if (_controller == null || !_controller!.value.isInitialized) {
-          _isProcessing = false; // Liberar flag si el controlador se volvió nulo
-          return;
-        }
-        // <<< FIN DEL CAMBIO >>>
+        _controller = CameraController(
+          camera,
+          ResolutionPreset.medium,
+          enableAudio: false,
+          imageFormatGroup: ImageFormatGroup.yuv420,
+        );
+        await _controller!.initialize();
+        print("HomeScreen: Controlador de cámara inicializado.");
 
-        final input = inputImageFromCameraImage(image, _controller!.description);
-        final faces = await ServiceLocator.faceDetector.detectFaces(input);
-        _facePresent = faces.isNotEmpty;
-
-        if (!mounted) {
-           _isProcessing = false;
-           return;
-        }
-        setState(() {});
-
-        if (faces.isNotEmpty) {
-          final rgb = yuv420ToImage(image);
-          final Rect box = faces.first.boundingBox;
-          final int x = box.left.clamp(0, rgb.width - 1).toInt();
-          final int y = box.top.clamp(0, rgb.height - 1).toInt();
-          final int w = box.width.clamp(1, rgb.width - x).toInt();
-          final int h = box.height.clamp(1, rgb.height - y).toInt();
-          final img.Image cropped = img.copyCrop(rgb, x: x, y: y, width: w, height: h);
-          final data = preprocessTo112Rgb(cropped);
-          final embedding = ServiceLocator.embedder.runEmbedding(data);
-          _lastEmbedding = embedding;
-
-          print('HomeScreen: Intentando identificar. Cache tiene: ${ServiceLocator.recognition.cacheStatus}');
-
-          final match = await ServiceLocator.recognition.identify(embedding, threshold: 0.85);
-
-          if (match != null) {
-            _lastDetectedId = match.id;
-            _lastDetectedName = match.name;
-            _lastDetectedDocument = match.document;
-            if (mounted) setState(() {});
-
-            _bannerTimer?.cancel();
-            _bannerTimer = Timer(const Duration(seconds: 2), () {
-              if (!mounted) return;
-              _lastDetectedId = null;
-              _lastDetectedName = null;
-              _lastDetectedDocument = null;
-              setState(() {});
-            });
-          }
+        if (mounted && _controller != null && _controller!.value.isInitialized) {
+          await _controller!.startImageStream(_onCameraImage);
+          print("HomeScreen: Image stream iniciado.");
+        } else {
+          print("HomeScreen: No se inició el image stream (widget desmontado o controlador no inicializado).");
         }
       } catch (e) {
-         print('HomeScreen: Error en _onCameraImage: $e');
+        print("HomeScreen: ERROR inicializando la cámara: $e");
+        _controller = null;
       } finally {
-        await Future.delayed(const Duration(milliseconds: 100));
-         if (mounted) {
-            _isProcessing = false;
-         }
+        if (mounted) {
+          setState(() {});
+        }
       }
-    }();
+  }
+
+  void _onCameraImage(CameraImage image) {
+    // ... (resto de _onCameraImage sin cambios) ...
+      if (_isProcessing || _controller == null || !_controller!.value.isInitialized) return;
+
+      _isProcessing = true;
+      () async {
+        try {
+          if (_controller == null || !_controller!.value.isInitialized) {
+            _isProcessing = false;
+            return;
+          }
+
+          final input = inputImageFromCameraImage(image, _controller!.description);
+          final faces = await ServiceLocator.faceDetector.detectFaces(input);
+          _facePresent = faces.isNotEmpty;
+
+          if (!mounted) {
+            _isProcessing = false;
+            return;
+          }
+          // Evitar setState si solo cambió _facePresent (puede causar jank)
+          // Solo llamamos setState si _facePresent cambió O si hay datos detectados
+          bool needsSetState = false;
+          if( (faces.isNotEmpty != _facePresent) ) {
+            _facePresent = faces.isNotEmpty;
+            needsSetState = true;
+          }
+
+
+          if (faces.isNotEmpty) {
+            final rgb = yuv420ToImage(image);
+            final Rect box = faces.first.boundingBox;
+            final int x = box.left.clamp(0, rgb.width - 1).toInt();
+            final int y = box.top.clamp(0, rgb.height - 1).toInt();
+            final int w = box.width.clamp(1, rgb.width - x).toInt();
+            final int h = box.height.clamp(1, rgb.height - y).toInt();
+            final img.Image cropped = img.copyCrop(rgb, x: x, y: y, width: w, height: h);
+            final data = preprocessTo112Rgb(cropped);
+            final embedding = ServiceLocator.embedder.runEmbedding(data);
+            _lastEmbedding = embedding;
+
+            // print('HomeScreen: Intentando identificar. Cache tiene: ${ServiceLocator.recognition.cacheStatus}');
+
+            final match = await ServiceLocator.recognition.identify(embedding, threshold: 0.85);
+
+            if (match != null) {
+              // Si el ID detectado es diferente al último, necesitamos setState
+              if (match.id != _lastDetectedId) needsSetState = true;
+
+              _lastDetectedId = match.id;
+              _lastDetectedName = match.name;
+              _lastDetectedDocument = match.document;
+
+
+              _bannerTimer?.cancel();
+              _bannerTimer = Timer(const Duration(seconds: 2), () {
+                if (!mounted) return;
+                // Verificar si el ID sigue siendo el mismo antes de borrar
+                if (_lastDetectedId == match.id) {
+                    _lastDetectedId = null;
+                    _lastDetectedName = null;
+                    _lastDetectedDocument = null;
+                    if(mounted) setState(() {}); // Necesario para ocultar el banner
+                }
+              });
+            } else {
+                // Si antes había una detección y ahora no, necesitamos setState para limpiar banner
+                if (_lastDetectedId != null) needsSetState = true;
+                _lastDetectedId = null;
+                _lastDetectedName = null;
+                _lastDetectedDocument = null;
+            }
+          } else {
+             // Si antes había una detección y ahora no, necesitamos setState
+             if (_lastDetectedId != null) needsSetState = true;
+             _lastDetectedId = null;
+             _lastDetectedName = null;
+             _lastDetectedDocument = null;
+          }
+
+          // Llamar a setState solo si es necesario
+          if (needsSetState && mounted) {
+             setState(() {});
+          }
+
+        } catch (e) {
+          print('HomeScreen: Error en _onCameraImage: $e');
+        } finally {
+          await Future.delayed(const Duration(milliseconds: 100));
+          if (mounted) {
+            _isProcessing = false;
+          }
+        }
+      }();
   }
 
   // --- Funciones de registro de ingreso/egreso (sin cambios) ---
   void _onRegisterIngress() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Intentando identificar para ingreso...')),
-    );
-    _registerAttendance(isIngress: true);
-  }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Intentando identificar para ingreso...')),
+      );
+      _registerAttendance(isIngress: true);
+    }
 
   void _onRegisterEgress() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Intentando identificar para salida...')),
-    );
-    _registerAttendance(isIngress: false);
-  }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Intentando identificar para salida...')),
+      );
+      _registerAttendance(isIngress: false);
+    }
 
   Future<void> _registerAttendance({required bool isIngress}) async {
-    String? id = _lastDetectedId;
-    if (id == null && _lastEmbedding != null) {
+      String? id = _lastDetectedId;
+      if (id == null && _lastEmbedding != null) {
+        try {
+          print('HomeScreen: _registerAttendance - Re-intentando identificar con último embedding...');
+          final match = await ServiceLocator.recognition.identify(_lastEmbedding!, threshold: 1.20);
+          if (match != null) {
+            id = match.id;
+            _lastDetectedId = match.id;
+            _lastDetectedName = match.name;
+            _lastDetectedDocument = match.document;
+            if (mounted) setState(() {});
+            print('HomeScreen: _registerAttendance - Identificación exitosa en re-intento.');
+          } else {
+            print('HomeScreen: _registerAttendance - Re-intento fallido.');
+          }
+        } catch (e) {
+          print('HomeScreen: _registerAttendance - Error en re-intento de identificación: $e');
+        }
+      }
+      if (id == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No se detectó identidad válida recientemente')),
+          );
+        }
+        return;
+      }
       try {
-        print('HomeScreen: _registerAttendance - Re-intentando identificar con último embedding...');
-        final match = await ServiceLocator.recognition.identify(_lastEmbedding!, threshold: 1.20);
-        if (match != null) {
-          id = match.id;
-          _lastDetectedId = match.id;
-          _lastDetectedName = match.name;
-          _lastDetectedDocument = match.document;
-          if (mounted) setState(() {});
-           print('HomeScreen: _registerAttendance - Identificación exitosa en re-intento.');
+        final String eventType = isIngress ? 'entrada' : 'salida';
+        if (isIngress) {
+          await ServiceLocator.attendance.registerIngress(id);
         } else {
-           print('HomeScreen: _registerAttendance - Re-intento fallido.');
+          await ServiceLocator.attendance.registerEgress(id);
+        }
+        // <<< CAMBIO: Forzar actualización del indicador de sync DESPUÉS de registrar >>>
+        if (mounted) _updateSyncStatus();
+
+        if (mounted) {
+          final String label = _lastDetectedName ?? 'ID $id';
+          final String suffix = _lastDetectedDocument != null ? ' · Doc: ${_lastDetectedDocument}' : '';
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${eventType.replaceFirst('e', 'E')} registrada para $label$suffix')));
+          print('HomeScreen: Registro de $eventType exitoso para ID $id ($label)');
         }
       } catch (e) {
-         print('HomeScreen: _registerAttendance - Error en re-intento de identificación: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error al registrar asistencia: $e')),
+          );
+        }
+        print('HomeScreen: ERROR registrando asistencia para ID $id: $e');
       }
     }
-    if (id == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No se detectó identidad válida recientemente')),
-        );
-      }
-      return;
-    }
-    try {
-      final String eventType = isIngress ? 'entrada' : 'salida';
-      if (isIngress) {
-        await ServiceLocator.attendance.registerIngress(id);
-      } else {
-        await ServiceLocator.attendance.registerEgress(id);
-      }
-      if (mounted) {
-        final String label = _lastDetectedName ?? 'ID $id';
-        final String suffix = _lastDetectedDocument != null ? ' · Doc: ${_lastDetectedDocument}' : '';
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${eventType.replaceFirst('e', 'E')} registrada para $label$suffix')));
-         print('HomeScreen: Registro de $eventType exitoso para ID $id ($label)');
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error al registrar asistencia: $e')),
-        );
-      }
-       print('HomeScreen: ERROR registrando asistencia para ID $id: $e');
-    }
-  }
-
 
   @override
   Widget build(BuildContext context) {
@@ -258,6 +321,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       appBar: AppBar(
         title: const Text('Asistencia Facial'),
         actions: [
+          // <<< CAMBIO: Añadir el indicador de sincronización >>>
+          IconButton(
+            icon: Icon(
+              _pendingSyncCount == 0 ? Icons.cloud_done_outlined : Icons.cloud_upload_outlined,
+              color: _pendingSyncCount == 0 ? Colors.greenAccent : Colors.orangeAccent,
+            ),
+            tooltip: _pendingSyncCount == 0
+                ? 'Sincronizado'
+                : '$_pendingSyncCount registros pendientes',
+            onPressed: () {
+              // Opcional: Podríamos forzar un intento de sincronización al tocar
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(_pendingSyncCount == 0
+                      ? 'Todos los registros están sincronizados.'
+                      : 'Hay $_pendingSyncCount registros pendientes de envío.')));
+              // ServiceLocator.sync.triggerManualSync(); // <-- Necesitaríamos añadir esta función a SyncService si quisiéramos forzar
+            },
+          ),
           IconButton(
             onPressed: widget.onOpenEmergencyScan,
             icon: const Icon(Icons.health_and_safety_outlined),
@@ -273,7 +354,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       body: FutureBuilder<void>(
         future: _initFuture,
         builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
+          // ... (resto del build sin cambios) ...
+           if (snapshot.connectionState == ConnectionState.waiting) {
              print("HomeScreen: Build - Esperando inicialización (_initFuture)...");
             return const Center(child: CircularProgressIndicator());
           }
@@ -287,7 +369,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
              return const Center(child: Text('Cámara no disponible. Verifique permisos o reinicie.'));
           }
 
-           print("HomeScreen: Build - Mostrando CameraPreview.");
+           // print("HomeScreen: Build - Mostrando CameraPreview."); // Evitar spam en consola
           return Stack(
             children: [
               Positioned.fill(child: CameraPreview(ctrl)),
@@ -326,14 +408,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                              ),
                            )
                         else if (!_facePresent && _lastDetectedName == null)
-                          const Padding(
-                            padding: EdgeInsets.only(top: 2.0),
-                            child: Text(
-                              'Buscando rostro...',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(color: Colors.white60, fontSize: 13),
-                            ),
-                          ),
+                           // Ya no mostramos "Buscando rostro..." aquí para reducir jank
+                           // Dejamos solo el mensaje principal o el nombre detectado
+                           const SizedBox.shrink(),
                       ],
                     ),
                   ),
