@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../screens/home_screen.dart';
 import '../screens/settings_screen.dart';
+// <<< CAMBIO: Importar la nueva pantalla que crearemos >>>
+import '../screens/emergency_scan_screen.dart';
 
 RouterConfig<Object> buildRouter() {
   return RouterConfig<Object>(
@@ -46,7 +48,10 @@ class _AppRouterDelegate extends RouterDelegate<List<String>>
 
   @override
   Widget build(BuildContext context) {
+    // <<< CAMBIO: Añadir un bool para la nueva ruta >>>
     final bool isSettings = _segments.isNotEmpty && _segments.first == 'settings';
+    final bool isEmergency = _segments.isNotEmpty && _segments.first == 'emergency';
+
     return Navigator(
       key: navigatorKey,
       pages: [
@@ -54,12 +59,20 @@ class _AppRouterDelegate extends RouterDelegate<List<String>>
           key: const ValueKey('home'),
           child: HomeScreen(
             onOpenSettings: () => _goTo('/settings'),
+            // <<< CAMBIO: Añadir el callback para la nueva ruta >>>
+            onOpenEmergencyScan: () => _goTo('/emergency'),
           ),
         ),
         if (isSettings)
           MaterialPage(
             key: const ValueKey('settings'),
             child: const SettingsScreen(),
+          ),
+        // <<< CAMBIO: Añadir la página de emergencia al stack de navegación >>>
+        if (isEmergency)
+          const MaterialPage(
+            key: ValueKey('emergency'),
+            child: EmergencyScanScreen(),
           ),
       ],
       onPopPage: (route, result) {
@@ -75,5 +88,3 @@ class _AppRouterDelegate extends RouterDelegate<List<String>>
     );
   }
 }
-
-
